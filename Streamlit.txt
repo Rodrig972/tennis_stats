@@ -1,0 +1,14 @@
+#Lignes de commande pour activer l'environnement virtuel
+#Utiliser un terminal (Git Bash par exemple)
+
+#Se mettre dans le dossier contenant l'environnement virtuel
+cd OneDrive/Bureau/Python/Projet_tennis
+ 
+#Activer l'environnement virtuel
+source env/Scripts/activate
+
+#lancer streamlit (le nom du fichier est: main.py)
+streamlit run main.py
+
+#Pour désactiver l'environnemnt virtuel
+deactivate
