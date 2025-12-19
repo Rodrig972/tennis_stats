@@ -5,7 +5,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import sqlite3
 from typing import List, Dict, Tuple, Optional
-from tennis_api import TennisAPI, format_live_matches
+from tennis_api import TennisAPI, format_live_matches, RAPIDAPI_KEY
 from datetime import datetime, timedelta
 
 @st.cache_data
@@ -33,6 +33,70 @@ def load_player_data(file_path: str, player_names: List[str], season: int) -> pd
     except Exception as e:
         st.error(f"Erreur lors du chargement des données: {e}")
         return pd.DataFrame()
+
+def get_player_list(file_path: str) -> List[str]:
+    """Récupère la liste distincte des joueurs présents dans la base pour alimenter la complétion"""
+    try:
+        connexion = sqlite3.connect(file_path)
+        query = """
+        SELECT DISTINCT Winner AS name FROM data
+        UNION
+        SELECT DISTINCT Loser AS name FROM data
+        """
+        df_players = pd.read_sql_query(query, connexion)
+        connexion.close()
+
+        if "name" in df_players.columns:
+            players = (
+                df_players["name"]
+                .dropna()
+                .astype(str)
+                .str.strip()
+                .sort_values()
+                .tolist()
+            )
+            return players
+        return []
+    except Exception as e:
+        st.error(f"Erreur lors du chargement de la liste des joueurs: {e}")
+        return []
+
+def get_player_image_url(player_name: str, circuit: str) -> Optional[str]:
+    """Tente de récupérer une URL de photo pour un joueur via l'API externe"""
+    try:
+        # Si la clé API est la valeur par défaut, on n'essaie pas d'appeler l'API
+        if not RAPIDAPI_KEY or RAPIDAPI_KEY == "votre_cle_api_rapidapi":
+            return None
+
+        api = TennisAPI()
+        results = api.search_players(player_name)
+
+        if results.empty:
+            return None
+
+        # Si la colonne name existe, essayer d'abord une correspondance exacte
+        row = None
+        if "name" in results.columns:
+            exact = results[results["name"] == player_name]
+            if not exact.empty:
+                row = exact.iloc[0]
+            else:
+                row = results.iloc[0]
+        else:
+            row = results.iloc[0]
+
+        # Chercher un champ potentiellement utilisable comme URL d'image
+        possible_cols = ["image", "profile_image", "picture", "photo"]
+        for col in possible_cols:
+            if col in results.columns:
+                value = row.get(col)
+                if isinstance(value, str) and value.startswith("http"):
+                    return value
+
+        return None
+    except Exception:
+        # On ne bloque pas le dashboard si l'API image échoue
+        return None
 
 def create_comparison_metrics(data: pd.DataFrame, players: List[str]) -> None:
     """Affiche les métriques comparatives pour les joueurs sélectionnés"""
@@ -89,6 +153,182 @@ def plot_surface_comparison(data: pd.DataFrame, players: List[str]) -> None:
             color_discrete_sequence=px.colors.qualitative.Plotly
         )
         st.plotly_chart(fig, use_container_width=True)
+
+def plot_radar_comparison(data: pd.DataFrame, players: List[str]) -> None:
+    """Affiche un radar chart pour comparer plusieurs indicateurs synthétiques entre les joueurs"""
+    if len(players) < 2:
+        return
+
+    st.subheader("Comparaison synthétique (Radar)")
+
+    metrics = []
+    for player in players:
+        player_data = data[data["Player"] == player]
+        if player_data.empty:
+            continue
+
+        wins = (player_data["Result"] == "Victoire").sum()
+        total = len(player_data)
+        win_rate = (wins / total * 100) if total > 0 else 0
+
+        # Taux de victoires par surface principale
+        surfaces = ["Hard", "Clay", "Grass"]
+        surface_win_rates = {}
+        for s in surfaces:
+            sd = player_data[player_data["Surface"] == s]
+            if not sd.empty:
+                s_wins = (sd["Result"] == "Victoire").sum()
+                surface_win_rates[s] = (s_wins / len(sd) * 100)
+            else:
+                surface_win_rates[s] = 0
+
+        titles = len(
+            player_data[
+                (player_data["Round"] == "The Final")
+                & (player_data["Result"] == "Victoire")
+            ]
+        )
+
+        metrics.append(
+            {
+                "player": player,
+                "global_win_rate": win_rate,
+                "hard_win_rate": surface_win_rates["Hard"],
+                "clay_win_rate": surface_win_rates["Clay"],
+                "grass_win_rate": surface_win_rates["Grass"],
+                "titles": titles,
+            }
+        )
+
+    if not metrics:
+        st.info("Données insuffisantes pour le radar chart.")
+        return
+
+    # Normaliser le nombre de titres sur une échelle 0-100 pour l'intégrer au radar
+    max_titles = max(m["titles"] for m in metrics) or 1
+
+    categories = [
+        "% Victoires global",
+        "% Victoires Hard",
+        "% Victoires Clay",
+        "% Victoires Grass",
+        "Titres (normalisés)",
+    ]
+
+    fig = go.Figure()
+    for m in metrics:
+        values = [
+            m["global_win_rate"],
+            m["hard_win_rate"],
+            m["clay_win_rate"],
+            m["grass_win_rate"],
+            (m["titles"] / max_titles) * 100,
+        ]
+        # Boucler pour fermer le polygone
+        fig.add_trace(
+            go.Scatterpolar(
+                r=values + [values[0]],
+                theta=categories + [categories[0]],
+                fill="toself",
+                name=m["player"],
+            )
+        )
+
+    fig.update_layout(
+        polar=dict(radialaxis=dict(visible=True, range=[0, 100])),
+        showlegend=True,
+        title="Indicateurs synthétiques par joueur",
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+def plot_surface_category_heatmap(data: pd.DataFrame, players: List[str]) -> None:
+    """Affiche une heatmap des résultats par surface x catégorie de tournoi"""
+    st.subheader("Résultats par surface et catégorie de tournoi")
+
+    # Détection de la colonne de catégorie de tournoi
+    possible_cols = ["Series", "Level", "Category", "Tier"]
+    cat_col = next((c for c in possible_cols if c in data.columns), None)
+
+    if cat_col is None:
+        st.info("Aucune colonne de catégorie de tournoi trouvée (Series/Level/Category/Tier).")
+        return
+
+    df = data.copy()
+    df["Victoire"] = (df["Result"] == "Victoire").astype(int)
+
+    grouped = (
+        df.groupby(["Surface", cat_col])["Victoire"]
+        .mean()
+        .reset_index()
+        .rename(columns={"Victoire": "WinRate"})
+    )
+
+    if grouped.empty:
+        st.info("Données insuffisantes pour la heatmap surface x catégorie.")
+        return
+
+    fig = px.density_heatmap(
+        grouped,
+        x="Surface",
+        y=cat_col,
+        z="WinRate",
+        color_continuous_scale="Viridis",
+        labels={"WinRate": "Taux de victoires"},
+    )
+    fig.update_coloraxes(colorbar_title="Taux de victoires")
+    st.plotly_chart(fig, use_container_width=True)
+
+def plot_season_stacked_results(data: pd.DataFrame, players: List[str]) -> None:
+    """Affiche des barres empilées victoires/défaites par saison"""
+    st.subheader("Victoires / Défaites par saison")
+
+    df = data.copy()
+
+    # Déterminer la saison à partir de la colonne Season ou de la Date
+    if "Season" in df.columns:
+        df["SeasonYear"] = df["Season"]
+    else:
+        if "Date" not in df.columns:
+            st.info("Impossible de déterminer la saison : colonne Date ou Season manquante.")
+            return
+        try:
+            df["Date"] = pd.to_datetime(df["Date"])
+            df["SeasonYear"] = df["Date"].dt.year
+        except Exception:
+            st.info("Impossible de parser les dates pour calculer la saison.")
+            return
+
+    df["Victoire"] = (df["Result"] == "Victoire").astype(int)
+    df["Défaite"] = (df["Result"] == "Défaite").astype(int)
+
+    grouped = (
+        df.groupby(["SeasonYear", "Player"])[["Victoire", "Défaite"]]
+        .sum()
+        .reset_index()
+        .melt(
+            id_vars=["SeasonYear", "Player"],
+            value_vars=["Victoire", "Défaite"],
+            var_name="Résultat",
+            value_name="Matchs",
+        )
+    )
+
+    if grouped.empty:
+        st.info("Données insuffisantes pour les barres empilées par saison.")
+        return
+
+    fig = px.bar(
+        grouped,
+        x="SeasonYear",
+        y="Matchs",
+        color="Résultat",
+        facet_col="Player",
+        barmode="stack",
+        category_orders={"Résultat": ["Victoire", "Défaite"]},
+        labels={"SeasonYear": "Saison", "Matchs": "Nombre de matchs"},
+    )
+    fig.update_layout(showlegend=True)
+    st.plotly_chart(fig, use_container_width=True)
 
 def plot_tournament_performance(data: pd.DataFrame, players: List[str]) -> None:
     """Affiche les performances par tournoi"""
@@ -215,30 +455,30 @@ def advanced_dashboard():
     
     file_path = f"Data_Base_Tennis/{circuit.lower()}_{season}.db"
     
-    # Saisie des joueurs à comparer
+    # Sélection des deux joueurs à comparer avec complétion
     st.sidebar.subheader("Sélection des joueurs")
-    player_input = st.sidebar.text_area(
-        "Entrez les noms des joueurs (un par ligne)",
-        "Djokovic N.\nNadal R.\nFederer R.",
-        help="Format: 'Nom Prénom' ou 'Nom P.' (ex: 'Djokovic N.')"
+    available_players = get_player_list(file_path)
+
+    if not available_players:
+        st.warning("Impossible de récupérer la liste des joueurs pour cette saison/circuit.")
+        return
+
+    player1 = st.sidebar.selectbox(
+        "Joueur 1",
+        options=available_players,
+        index=0 if available_players else None,
     )
-    
-    # Si l'utilisateur a coché l'option de données en temps réel
-    if use_realtime:
-        st.sidebar.info("🔍 La recherche de joueurs en temps réel est activée.")
-        search_query = st.sidebar.text_input("Rechercher un joueur (temps réel)", "")
-        
-        if search_query and len(search_query) > 2:  # Ne pas chercher pour moins de 3 caractères
-            api = TennisAPI()
-            search_results = api.search_players(search_query)
-            
-            if not search_results.empty:
-                st.sidebar.write("Résultats de la recherche:")
-                for _, player in search_results.iterrows():
-                    if st.sidebar.button(f"Ajouter {player.get('name', 'Inconnu')}"):
-                        player_input = f"{player_input}\n{player.get('name', '')}"
-                        st.experimental_rerun()
-    player_names = [name.strip() for name in player_input.split('\n') if name.strip()]
+
+    # Filtrer la liste pour le second joueur afin d'éviter de choisir deux fois le même
+    remaining_players = [p for p in available_players if p != player1]
+
+    player2 = st.sidebar.selectbox(
+        "Joueur 2",
+        options=remaining_players if remaining_players else available_players,
+        index=0 if (remaining_players or available_players) else None,
+    )
+
+    player_names = [p for p in [player1, player2] if p]
     
     if not player_names:
         st.warning("Veuillez entrer au moins un nom de joueur")
@@ -255,6 +495,16 @@ def advanced_dashboard():
     tab1, tab2, tab3 = st.tabs(["📊 Vue d'ensemble", "🎾 Par Surface", "🏆 Par Tournoi"])
     
     with tab1:
+        # Affichage des photos des joueurs (si disponibles)
+        photo_cols = st.columns(len(player_names)) if player_names else []
+        for col, player in zip(photo_cols, player_names):
+            with col:
+                img_url = get_player_image_url(player, circuit.lower())
+                if img_url:
+                    st.image(img_url, width=120, caption=player)
+                else:
+                    st.markdown(f"**{player}**")
+
         create_comparison_metrics(data, player_names)
         
         # Graphique d'évolution dans le temps
@@ -288,6 +538,15 @@ def advanced_dashboard():
             
         except Exception as e:
             st.warning(f"Impossible d'afficher l'évolution dans le temps : {e}")
+        
+        # Radar chart de comparaison synthétique
+        plot_radar_comparison(data, player_names)
+        
+        # Heatmap surface x catégorie de tournoi
+        plot_surface_category_heatmap(data, player_names)
+        
+        # Barres empilées victoires/défaites par saison
+        plot_season_stacked_results(data, player_names)
     
     with tab2:
         display_live_matches()
