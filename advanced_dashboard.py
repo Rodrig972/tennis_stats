@@ -8,6 +8,17 @@ from typing import List, Dict, Tuple, Optional
 from tennis_api import TennisAPI, format_live_matches, RAPIDAPI_KEY
 from datetime import datetime, timedelta
 
+def _realtime_enabled(use_realtime: bool) -> bool:
+    if not use_realtime:
+        st.info("Mode temps réel désactivé. Activez 'Afficher les données en temps réel' dans la barre latérale pour charger les données live.")
+        return False
+
+    if not RAPIDAPI_KEY or RAPIDAPI_KEY == "votre_cle_api_rapidapi":
+        st.warning("Clé RapidAPI manquante. Ajoutez la variable d'environnement TENNIS_API_KEY sur Render pour activer les données live.")
+        return False
+
+    return True
+
 @st.cache_data
 def load_player_data(file_path: str, player_names: List[str], season: int) -> pd.DataFrame:
     """Charge les données pour plusieurs joueurs"""
@@ -152,6 +163,7 @@ def plot_surface_comparison(data: pd.DataFrame, players: List[str]) -> None:
             title='Taux de victoires par surface',
             color_discrete_sequence=px.colors.qualitative.Plotly
         )
+        fig.update_layout(xaxis={'categoryorder':'total descending'})
         st.plotly_chart(fig, use_container_width=True)
 
 def plot_radar_comparison(data: pd.DataFrame, players: List[str]) -> None:
@@ -372,9 +384,12 @@ def plot_tournament_performance(data: pd.DataFrame, players: List[str]) -> None:
             fig.update_layout(xaxis={'categoryorder':'total descending'})
             st.plotly_chart(fig, use_container_width=True)
 
-def display_live_matches():
+def display_live_matches(use_realtime: bool):
     """Affiche les matchs en direct"""
     st.subheader("🎾 Matchs en Direct")
+    
+    if not _realtime_enabled(use_realtime):
+        return
     
     api = TennisAPI()
     live_matches = api.get_live_matches()
@@ -405,9 +420,12 @@ def display_live_matches():
         st.caption(f"**{match['Tournoi']}** - {match['Tour']} - {match['Statut']}")
         st.markdown("---")
 
-def display_rankings():
+def display_rankings(use_realtime: bool):
     """Affiche les classements ATP/WTA"""
     st.subheader("🏆 Classements")
+    
+    if not _realtime_enabled(use_realtime):
+        return
     
     api = TennisAPI()
     col1, col2 = st.columns(2)
@@ -549,10 +567,10 @@ def advanced_dashboard():
         plot_season_stacked_results(data, player_names)
     
     with tab2:
-        display_live_matches()
+        display_live_matches(use_realtime)
         
     with tab3:
-        display_rankings()
+        display_rankings(use_realtime)
         
         # Ajouter des graphiques supplémentaires pour les classements
         st.subheader("Évolution du Top 10")
@@ -560,10 +578,14 @@ def advanced_dashboard():
         
     with tab4:
         st.subheader("Prochains Tournois")
-        api = TennisAPI()
-        today = datetime.now()
-        next_month = today + timedelta(days=30)
-        tournaments = api.get_tournaments(today.strftime('%Y-%m-%d'), next_month.strftime('%Y-%m-%d'))
+        
+        if not _realtime_enabled(use_realtime):
+            tournaments = pd.DataFrame()
+        else:
+            api = TennisAPI()
+            today = datetime.now()
+            next_month = today + timedelta(days=30)
+            tournaments = api.get_tournaments(today.strftime('%Y-%m-%d'), next_month.strftime('%Y-%m-%d'))
         
         if not tournaments.empty:
             # Filtrer et formater les données
