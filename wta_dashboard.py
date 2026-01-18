@@ -1,4 +1,5 @@
 import sqlite3
+import os
 import pandas as pd
 import streamlit as st
 import plotly.express as px
@@ -17,6 +18,44 @@ def load_data(file_path, player_name, surface_condition="", series_condition="")
         return data
     except (sqlite3.OperationalError, pd.errors.DatabaseError):
         return pd.DataFrame()  # Retourne un DataFrame vide en cas d'erreur
+
+def _db_has_table(file_path: str, table_name: str) -> bool:
+    try:
+        connexion = sqlite3.connect(file_path)
+        cur = connexion.cursor()
+        cur.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+            (table_name,),
+        )
+        ok = cur.fetchone() is not None
+        connexion.close()
+        return ok
+    except Exception:
+        return False
+
+@st.cache_data
+def _db_players_overview(file_path: str) -> tuple[int, list[str]]:
+    try:
+        connexion = sqlite3.connect(file_path)
+        cur = connexion.cursor()
+        total = int(cur.execute("SELECT COUNT(*) FROM data").fetchone()[0])
+        rows = cur.execute(
+            """
+            SELECT name FROM (
+              SELECT Winner AS name FROM data
+              UNION
+              SELECT Loser AS name FROM data
+            )
+            WHERE name IS NOT NULL AND TRIM(name) <> ''
+            ORDER BY name
+            LIMIT 80;
+            """
+        ).fetchall()
+        connexion.close()
+        players = [str(r[0]) for r in rows if r and r[0]]
+        return total, players
+    except Exception:
+        return 0, []
 
 def load_three_set_matches(file_path, player_name):
     try:
@@ -79,13 +118,29 @@ def calculate_average_sets(data, player_name):
     return avg_sets_grand_slam, avg_sets_non_grand_slam
 
 def wta_dashboard(player_name, season, surface_condition="", series_condition=""):
-    file_path = f"Data_Base_Tennis/wta_{season}.db"
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    file_path = os.path.join(base_dir, "Data_Base_Tennis", f"wta_{season}.db")
+
+    if not os.path.exists(file_path):
+        st.error(f"Base introuvable: {file_path}")
+        return
+
+    if not _db_has_table(file_path, "data"):
+        st.error(f"Base invalide: table 'data' introuvable dans {os.path.basename(file_path)}")
+        return
 
     data = load_data(file_path, player_name, surface_condition, series_condition)
     three_set_matches = load_three_set_matches(file_path, player_name)
 
     if data.empty:
         st.warning("Aucune donnée trouvée pour ce joueur avec les filtres sélectionnés.")
+        with st.expander("Diagnostic base 2026 (WTA)", expanded=False):
+            st.write(f"Base utilisée : {file_path}")
+            total, players = _db_players_overview(file_path)
+            st.write(f"Matchs dans la base : {total}")
+            if players:
+                st.write("Exemples de noms disponibles (saisie exacte requise) :")
+                st.code("\n".join(players))
         return
 
     stats = calculate_statistics(data, player_name)
